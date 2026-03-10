@@ -9,10 +9,12 @@ import (
 )
 
 type Config struct {
-	APIKey     string `yaml:"-"`
-	Port       int64  `yaml:"port"`
-	Profile    string `yaml:"profile"`
-	ConfigPath string `yaml:"-"`
+	APIKey             string `yaml:"-"`
+	Port               int64  `yaml:"port"`
+	Profile            string `yaml:"profile"`
+	RequestTimeoutSec  int64  `yaml:"request_timeout_sec"`
+	ModelsTimeoutSec   int64  `yaml:"models_timeout_sec"`
+	ConfigPath         string `yaml:"-"`
 	Profiles map[string]ProfileFileConfig `yaml:"profiles,omitempty"`
 }
 
@@ -26,9 +28,11 @@ type ProfileFileConfig struct {
 func DefaultConfig() *Config {
 	home, _ := os.UserHomeDir()
 	return &Config{
-		Port:       8402,
-		Profile:    "auto",
-		ConfigPath: filepath.Join(home, ".clawgo", "config.yaml"),
+		Port:              8402,
+		Profile:           "auto",
+		RequestTimeoutSec: 45,
+		ModelsTimeoutSec:  15,
+		ConfigPath:        filepath.Join(home, ".clawgo", "config.yaml"),
 	}
 }
 
@@ -45,6 +49,16 @@ func LoadConfig() *Config {
 	}
 	if profile := os.Getenv("CLAWGO_PROFILE"); profile != "" {
 		cfg.Profile = profile
+	}
+	if timeout := os.Getenv("CLAWGO_REQUEST_TIMEOUT_SEC"); timeout != "" {
+		if v, err := strconv.ParseInt(timeout, 10, 64); err == nil && v > 0 {
+			cfg.RequestTimeoutSec = v
+		}
+	}
+	if timeout := os.Getenv("CLAWGO_MODELS_TIMEOUT_SEC"); timeout != "" {
+		if v, err := strconv.ParseInt(timeout, 10, 64); err == nil && v > 0 {
+			cfg.ModelsTimeoutSec = v
+		}
 	}
 	if configPath := os.Getenv("CLAWGO_CONFIG"); configPath != "" {
 		cfg.ConfigPath = configPath
@@ -70,6 +84,12 @@ func (c *Config) loadFile() {
 	}
 	if c.Profile == "auto" && fileCfg.Profile != "" {
 		c.Profile = fileCfg.Profile
+	}
+	if c.RequestTimeoutSec == 45 && fileCfg.RequestTimeoutSec > 0 {
+		c.RequestTimeoutSec = fileCfg.RequestTimeoutSec
+	}
+	if c.ModelsTimeoutSec == 15 && fileCfg.ModelsTimeoutSec > 0 {
+		c.ModelsTimeoutSec = fileCfg.ModelsTimeoutSec
 	}
 	if fileCfg.Profiles != nil {
 		c.Profiles = fileCfg.Profiles

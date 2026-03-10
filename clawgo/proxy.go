@@ -19,7 +19,6 @@ const (
 	openRouterModelsURLProxy  = "https://openrouter.ai/api/v1/models"
 	heartbeatInterval         = 2 * time.Second
 	maxFallbackAttempts       = 5
-	requestTimeout            = 180 * time.Second
 )
 
 // Proxy is the HTTP proxy server.
@@ -52,7 +51,7 @@ func NewProxy(cfg *Config, router *Router, catalog *ModelCatalog, balance *Balan
 		dedup:   dedup,
 		cache:   cache,
 		mux:     http.NewServeMux(),
-		client:  &http.Client{Timeout: requestTimeout},
+		client:  &http.Client{Timeout: time.Duration(cfg.RequestTimeoutSec) * time.Second},
 	}
 
 	p.mux.HandleFunc("/v1/chat/completions", p.handleChatCompletions)
@@ -87,6 +86,7 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	if p.baseURL != "" {
 		modelsURL = p.baseURL + "/v1/models"
 	}
+	client := &http.Client{Timeout: time.Duration(p.config.ModelsTimeoutSec) * time.Second}
 	req, err := http.NewRequest("GET", modelsURL, nil)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, schema.ErrorResponse{
@@ -96,7 +96,7 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Set("Authorization", "Bearer "+p.config.APIKey)
 
-	resp, err := p.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, schema.ErrorResponse{
 			Error: schema.ErrorDetail{Message: err.Error(), Type: "upstream_error"},
