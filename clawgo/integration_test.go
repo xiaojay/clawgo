@@ -385,6 +385,8 @@ func TestDebugHTTPLogging(t *testing.T) {
 func TestDebugTranscriptLoggingNonStreaming(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		cost := 0.000321
+		upstreamCost := 0.000222
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"id":     "chatcmpl-test",
 			"object": "chat.completion",
@@ -396,10 +398,21 @@ func TestDebugTranscriptLoggingNonStreaming(t *testing.T) {
 					"finish_reason": "stop",
 				},
 			},
-			"usage": map[string]int64{
+			"usage": map[string]interface{}{
 				"prompt_tokens":     12,
 				"completion_tokens": 3,
 				"total_tokens":      15,
+				"cost":              cost,
+				"prompt_tokens_details": map[string]int64{
+					"cached_tokens":      9,
+					"cache_write_tokens": 18,
+				},
+				"completion_tokens_details": map[string]int64{
+					"reasoning_tokens": 2,
+				},
+				"cost_details": map[string]float64{
+					"upstream_inference_cost": upstreamCost,
+				},
 			},
 		})
 	}))
@@ -441,6 +454,9 @@ func TestDebugTranscriptLoggingNonStreaming(t *testing.T) {
 	assert.Contains(t, logBuf.String(), "[user]\nhello")
 	assert.Contains(t, logBuf.String(), "[assistant]\nHello!")
 	assert.Contains(t, logBuf.String(), "usage: prompt=12 completion=3 total=15")
+	assert.Contains(t, logBuf.String(), "cache: hit=true cached_tokens=9 cache_write_tokens=18")
+	assert.Contains(t, logBuf.String(), "reasoning: tokens=2")
+	assert.Contains(t, logBuf.String(), "cost: total=$0.000321 upstream_inference=$0.000222")
 }
 
 func TestDebugTranscriptLoggingStreaming(t *testing.T) {
@@ -454,7 +470,7 @@ func TestDebugTranscriptLoggingStreaming(t *testing.T) {
 		chunks := []string{
 			`data: {"id":"chatcmpl-1","model":"openai/gpt-4o","choices":[{"delta":{"role":"assistant"},"index":0}]}`,
 			`data: {"id":"chatcmpl-1","model":"openai/gpt-4o","choices":[{"delta":{"content":"Hi"},"index":0}]}`,
-			`data: {"id":"chatcmpl-1","model":"openai/gpt-4o","choices":[{"delta":{"content":" there"},"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`,
+			`data: {"id":"chatcmpl-1","model":"openai/gpt-4o","choices":[{"delta":{"content":" there"},"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7,"cost":0.000111,"prompt_tokens_details":{"cached_tokens":5,"cache_write_tokens":0},"completion_tokens_details":{"reasoning_tokens":1}}}`,
 			`data: [DONE]`,
 		}
 		for _, chunk := range chunks {
@@ -499,5 +515,8 @@ func TestDebugTranscriptLoggingStreaming(t *testing.T) {
 	assert.Contains(t, logBuf.String(), "stream=true")
 	assert.Contains(t, logBuf.String(), "[assistant]\nHi there")
 	assert.Contains(t, logBuf.String(), "usage: prompt=5 completion=2 total=7")
+	assert.Contains(t, logBuf.String(), "cache: hit=true cached_tokens=5 cache_write_tokens=0")
+	assert.Contains(t, logBuf.String(), "reasoning: tokens=1")
+	assert.Contains(t, logBuf.String(), "cost: total=$0.000111")
 	assert.NotContains(t, logBuf.String(), "stream_chunk")
 }

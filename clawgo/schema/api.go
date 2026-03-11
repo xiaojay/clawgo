@@ -46,9 +46,26 @@ type Choice struct {
 }
 
 type Usage struct {
-	PromptTokens     int64 `json:"prompt_tokens"`
-	CompletionTokens int64 `json:"completion_tokens"`
-	TotalTokens      int64 `json:"total_tokens"`
+	PromptTokens            int64                    `json:"prompt_tokens"`
+	CompletionTokens        int64                    `json:"completion_tokens"`
+	TotalTokens             int64                    `json:"total_tokens"`
+	Cost                    *float64                 `json:"cost,omitempty"`
+	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+	CostDetails             *CostDetails             `json:"cost_details,omitempty"`
+}
+
+type PromptTokensDetails struct {
+	CachedTokens     int64 `json:"cached_tokens,omitempty"`
+	CacheWriteTokens int64 `json:"cache_write_tokens,omitempty"`
+}
+
+type CompletionTokensDetails struct {
+	ReasoningTokens int64 `json:"reasoning_tokens,omitempty"`
+}
+
+type CostDetails struct {
+	UpstreamInferenceCost *float64 `json:"upstream_inference_cost,omitempty"`
 }
 
 type ErrorResponse struct {

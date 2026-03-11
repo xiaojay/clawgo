@@ -44,7 +44,34 @@ func TestFormatTranscriptMessageContent(t *testing.T) {
 	assert.Contains(t, formatted, "\"text\": \"hello\"")
 }
 
+func TestFormatTranscriptUsage(t *testing.T) {
+	cost := 0.001234
+	upstreamCost := 0.001111
+	lines := formatTranscriptUsage(&schema.Usage{
+		PromptTokens:     100,
+		CompletionTokens: 20,
+		TotalTokens:      120,
+		Cost:             &cost,
+		PromptTokensDetails: &schema.PromptTokensDetails{
+			CachedTokens:     64,
+			CacheWriteTokens: 128,
+		},
+		CompletionTokensDetails: &schema.CompletionTokensDetails{
+			ReasoningTokens: 7,
+		},
+		CostDetails: &schema.CostDetails{
+			UpstreamInferenceCost: &upstreamCost,
+		},
+	})
+
+	assert.Contains(t, lines, "usage: prompt=100 completion=20 total=120")
+	assert.Contains(t, lines, "cache: hit=true cached_tokens=64 cache_write_tokens=128")
+	assert.Contains(t, lines, "reasoning: tokens=7")
+	assert.Contains(t, lines, "cost: total=$0.001234 upstream_inference=$0.001111")
+}
+
 func TestLogDebugTranscriptIncludesConversation(t *testing.T) {
+	cost := 0.002345
 	trace := &transcriptTrace{
 		ID:             "abcd1234",
 		SessionID:      "sess1",
@@ -66,6 +93,13 @@ func TestLogDebugTranscriptIncludesConversation(t *testing.T) {
 			PromptTokens:     10,
 			CompletionTokens: 8,
 			TotalTokens:      18,
+			Cost:             &cost,
+			PromptTokensDetails: &schema.PromptTokensDetails{
+				CachedTokens: 4,
+			},
+			CompletionTokensDetails: &schema.CompletionTokensDetails{
+				ReasoningTokens: 2,
+			},
 		},
 	}
 
@@ -90,6 +124,9 @@ func TestLogDebugTranscriptIncludesConversation(t *testing.T) {
 	assert.Contains(t, logged, "[user]\nwrite a haiku")
 	assert.Contains(t, logged, "[assistant]\nQuiet autumn breeze")
 	assert.Contains(t, logged, "usage: prompt=10 completion=8 total=18")
+	assert.Contains(t, logged, "cache: hit=true cached_tokens=4 cache_write_tokens=0")
+	assert.Contains(t, logged, "reasoning: tokens=2")
+	assert.Contains(t, logged, "cost: total=$0.002345")
 	assert.Contains(t, logged, "\033[38;5;196m")
 	assert.Contains(t, logged, "\033[0m")
 }

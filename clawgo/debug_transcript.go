@@ -116,8 +116,7 @@ func logDebugTranscript(enabled bool, trace *transcriptTrace) {
 
 	var meta []string
 	if trace.Usage != nil {
-		meta = append(meta, fmt.Sprintf("usage: prompt=%d completion=%d total=%d",
-			trace.Usage.PromptTokens, trace.Usage.CompletionTokens, trace.Usage.TotalTokens))
+		meta = append(meta, formatTranscriptUsage(trace.Usage)...)
 	}
 	if trace.FinishReason != "" {
 		meta = append(meta, "finish="+trace.FinishReason)
@@ -315,8 +314,33 @@ func cloneUsage(usage *schema.Usage) *schema.Usage {
 	if usage == nil {
 		return nil
 	}
-	cloned := *usage
-	return &cloned
+
+	cloned := &schema.Usage{
+		PromptTokens:     usage.PromptTokens,
+		CompletionTokens: usage.CompletionTokens,
+		TotalTokens:      usage.TotalTokens,
+	}
+	if usage.Cost != nil {
+		value := *usage.Cost
+		cloned.Cost = &value
+	}
+	if usage.PromptTokensDetails != nil {
+		details := *usage.PromptTokensDetails
+		cloned.PromptTokensDetails = &details
+	}
+	if usage.CompletionTokensDetails != nil {
+		details := *usage.CompletionTokensDetails
+		cloned.CompletionTokensDetails = &details
+	}
+	if usage.CostDetails != nil {
+		details := &schema.CostDetails{}
+		if usage.CostDetails.UpstreamInferenceCost != nil {
+			value := *usage.CostDetails.UpstreamInferenceCost
+			details.UpstreamInferenceCost = &value
+		}
+		cloned.CostDetails = details
+	}
+	return cloned
 }
 
 func colorfulTranscriptSeparator(width int) string {
@@ -331,4 +355,40 @@ func colorfulTranscriptSeparator(width int) string {
 	}
 	b.WriteString(transcriptSeparatorReset)
 	return b.String()
+}
+
+func formatTranscriptUsage(usage *schema.Usage) []string {
+	if usage == nil {
+		return nil
+	}
+
+	lines := []string{
+		fmt.Sprintf("usage: prompt=%d completion=%d total=%d",
+			usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens),
+	}
+
+	if usage.PromptTokensDetails != nil {
+		lines = append(lines, fmt.Sprintf("cache: hit=%t cached_tokens=%d cache_write_tokens=%d",
+			usage.PromptTokensDetails.CachedTokens > 0,
+			usage.PromptTokensDetails.CachedTokens,
+			usage.PromptTokensDetails.CacheWriteTokens))
+	}
+
+	if usage.CompletionTokensDetails != nil && usage.CompletionTokensDetails.ReasoningTokens > 0 {
+		lines = append(lines, fmt.Sprintf("reasoning: tokens=%d",
+			usage.CompletionTokensDetails.ReasoningTokens))
+	}
+
+	if usage.Cost != nil || (usage.CostDetails != nil && usage.CostDetails.UpstreamInferenceCost != nil) {
+		var parts []string
+		if usage.Cost != nil {
+			parts = append(parts, fmt.Sprintf("total=$%.6f", *usage.Cost))
+		}
+		if usage.CostDetails != nil && usage.CostDetails.UpstreamInferenceCost != nil {
+			parts = append(parts, fmt.Sprintf("upstream_inference=$%.6f", *usage.CostDetails.UpstreamInferenceCost))
+		}
+		lines = append(lines, "cost: "+strings.Join(parts, " "))
+	}
+
+	return lines
 }
