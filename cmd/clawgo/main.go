@@ -38,6 +38,11 @@ func main() {
 				EnvVars: []string{"CLAWGO_DEBUG_HTTP"},
 				Usage:   "Log inbound requests and OpenRouter HTTP traffic",
 			},
+			&cli.BoolFlag{
+				Name:    "debug-transcript",
+				EnvVars: []string{"CLAWGO_DEBUG_TRANSCRIPT"},
+				Usage:   "Log readable LLM conversation transcripts",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			cfg := clawgo.LoadConfig()
@@ -52,6 +57,9 @@ func main() {
 			}
 			if c.IsSet("debug-http") {
 				cfg.DebugHTTP = c.Bool("debug-http")
+			}
+			if c.IsSet("debug-transcript") {
+				cfg.DebugTranscript = c.Bool("debug-transcript")
 			}
 
 			app := clawgo.New(cfg)

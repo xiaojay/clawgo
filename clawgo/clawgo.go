@@ -74,6 +74,7 @@ func (c *ClawGo) Run() error {
 	fmt.Printf("  Smart LLM Router → OpenRouter\n")
 	fmt.Printf("  Profile: %s\n", c.config.Profile)
 	fmt.Printf("  Debug HTTP: %t\n", c.config.DebugHTTP)
+	fmt.Printf("  Debug Transcript: %t\n", c.config.DebugTranscript)
 	fmt.Printf("  Models: %d loaded\n", c.catalog.Count())
 	fmt.Printf("  Listening: http://localhost:%d\n\n", c.config.Port)
 

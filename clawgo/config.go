@@ -13,6 +13,7 @@ type Config struct {
 	Port              int64                        `yaml:"port"`
 	Profile           string                       `yaml:"profile"`
 	DebugHTTP         bool                         `yaml:"debug_http"`
+	DebugTranscript   bool                         `yaml:"debug_transcript"`
 	RequestTimeoutSec int64                        `yaml:"request_timeout_sec"`
 	ModelsTimeoutSec  int64                        `yaml:"models_timeout_sec"`
 	ConfigPath        string                       `yaml:"-"`
@@ -56,6 +57,11 @@ func LoadConfig() *Config {
 			cfg.DebugHTTP = v
 		}
 	}
+	if debugTranscript := os.Getenv("CLAWGO_DEBUG_TRANSCRIPT"); debugTranscript != "" {
+		if v, err := strconv.ParseBool(debugTranscript); err == nil {
+			cfg.DebugTranscript = v
+		}
+	}
 	if timeout := os.Getenv("CLAWGO_REQUEST_TIMEOUT_SEC"); timeout != "" {
 		if v, err := strconv.ParseInt(timeout, 10, 64); err == nil && v > 0 {
 			cfg.RequestTimeoutSec = v
@@ -93,6 +99,9 @@ func (c *Config) loadFile() {
 	}
 	if !c.DebugHTTP && fileCfg.DebugHTTP {
 		c.DebugHTTP = true
+	}
+	if !c.DebugTranscript && fileCfg.DebugTranscript {
+		c.DebugTranscript = true
 	}
 	if c.RequestTimeoutSec == 45 && fileCfg.RequestTimeoutSec > 0 {
 		c.RequestTimeoutSec = fileCfg.RequestTimeoutSec

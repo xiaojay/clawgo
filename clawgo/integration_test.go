@@ -381,3 +381,123 @@ func TestDebugHTTPLogging(t *testing.T) {
 	assert.Contains(t, logBuf.String(), `Authorization=["Bearer <redacted>"]`)
 	assert.NotContains(t, logBuf.String(), "Bearer test-key")
 }
+
+func TestDebugTranscriptLoggingNonStreaming(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":     "chatcmpl-test",
+			"object": "chat.completion",
+			"model":  "google/gemini-2.5-flash",
+			"choices": []map[string]interface{}{
+				{
+					"index":         0,
+					"message":       map[string]string{"role": "assistant", "content": "Hello!"},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]int64{
+				"prompt_tokens":     12,
+				"completion_tokens": 3,
+				"total_tokens":      15,
+			},
+		})
+	}))
+	defer mock.Close()
+
+	proxy, cleanup := newTestProxy("test-key", mock.URL)
+	defer cleanup()
+	proxy.config.DebugTranscript = true
+
+	var logBuf bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	}()
+
+	chatReq := schema.ChatCompletionRequest{
+		Model: "google/gemini-2.5-flash",
+		Messages: []schema.ChatMessage{
+			{Role: "system", Content: "you are helpful"},
+			{Role: "user", Content: "hello"},
+		},
+	}
+	bodyBytes, err := json.Marshal(chatReq)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, logBuf.String(), "llm_transcript id=")
+	assert.Contains(t, logBuf.String(), "source=upstream")
+	assert.Contains(t, logBuf.String(), "[system]\nyou are helpful")
+	assert.Contains(t, logBuf.String(), "[user]\nhello")
+	assert.Contains(t, logBuf.String(), "[assistant]\nHello!")
+	assert.Contains(t, logBuf.String(), "usage: prompt=12 completion=3 total=15")
+}
+
+func TestDebugTranscriptLoggingStreaming(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if ok {
+			flusher.Flush()
+		}
+		chunks := []string{
+			`data: {"id":"chatcmpl-1","model":"openai/gpt-4o","choices":[{"delta":{"role":"assistant"},"index":0}]}`,
+			`data: {"id":"chatcmpl-1","model":"openai/gpt-4o","choices":[{"delta":{"content":"Hi"},"index":0}]}`,
+			`data: {"id":"chatcmpl-1","model":"openai/gpt-4o","choices":[{"delta":{"content":" there"},"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`,
+			`data: [DONE]`,
+		}
+		for _, chunk := range chunks {
+			fmt.Fprintf(w, "%s\n\n", chunk)
+			if ok {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer mock.Close()
+
+	proxy, cleanup := newTestProxy("test-key", mock.URL)
+	defer cleanup()
+	proxy.config.DebugTranscript = true
+
+	var logBuf bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	}()
+
+	chatReq := schema.ChatCompletionRequest{
+		Model:  "openai/gpt-4o",
+		Stream: true,
+		Messages: []schema.ChatMessage{
+			{Role: "user", Content: "hello"},
+		},
+	}
+	bodyBytes, err := json.Marshal(chatReq)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, logBuf.String(), "stream=true")
+	assert.Contains(t, logBuf.String(), "[assistant]\nHi there")
+	assert.Contains(t, logBuf.String(), "usage: prompt=5 completion=2 total=7")
+	assert.NotContains(t, logBuf.String(), "stream_chunk")
+}

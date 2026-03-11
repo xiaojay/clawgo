@@ -642,6 +642,7 @@ sudo systemctl start clawgo
 | `CLAWGO_PORT` | `8402` | 代理监听端口 |
 | `CLAWGO_PROFILE` | `auto` | 默认路由配置 |
 | `CLAWGO_DEBUG_HTTP` | `false` | 打印入站请求和 OpenRouter HTTP 交互日志 |
+| `CLAWGO_DEBUG_TRANSCRIPT` | `false` | 打印可读的 LLM 对话 transcript |
 | `CLAWGO_CONFIG` | `~/.clawgo/config.yaml` | 配置文件路径 |
 
 ### CLI 参数
@@ -654,6 +655,7 @@ Options:
   --port         监听端口 (默认 8402)
   --profile      路由配置 auto/eco/premium (默认 auto)
   --debug-http   打印入站请求和 OpenRouter HTTP 交互日志
+  --debug-transcript 打印可读的 LLM 对话 transcript
   --version, -v  显示版本
   --help, -h     显示帮助
 ```
@@ -666,6 +668,7 @@ Options:
 port: 8402
 profile: auto
 debug_http: false
+debug_transcript: false
 
 # 自定义层级模型映射 (覆盖默认值)
 profiles:

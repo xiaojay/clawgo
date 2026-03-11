@@ -19,11 +19,13 @@ func TestConfigFromEnv(t *testing.T) {
 	os.Setenv("CLAWGO_PORT", "9999")
 	os.Setenv("CLAWGO_PROFILE", "eco")
 	os.Setenv("CLAWGO_DEBUG_HTTP", "true")
+	os.Setenv("CLAWGO_DEBUG_TRANSCRIPT", "true")
 	defer func() {
 		os.Unsetenv("OPENROUTER_API_KEY")
 		os.Unsetenv("CLAWGO_PORT")
 		os.Unsetenv("CLAWGO_PROFILE")
 		os.Unsetenv("CLAWGO_DEBUG_HTTP")
+		os.Unsetenv("CLAWGO_DEBUG_TRANSCRIPT")
 	}()
 
 	cfg := LoadConfig()
@@ -31,4 +33,5 @@ func TestConfigFromEnv(t *testing.T) {
 	assert.Equal(t, int64(9999), cfg.Port)
 	assert.Equal(t, "eco", cfg.Profile)
 	assert.True(t, cfg.DebugHTTP)
+	assert.True(t, cfg.DebugTranscript)
 }

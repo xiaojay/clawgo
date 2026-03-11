@@ -25,6 +25,25 @@ const (
 	maxFallbackAttempts      = 5
 )
 
+type forwardResult struct {
+	Status   int
+	Duration time.Duration
+	Parsed   transcriptResponse
+}
+
+type upstreamAttemptError struct {
+	Status   int
+	Duration time.Duration
+	Err      error
+}
+
+func (e *upstreamAttemptError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
 // Proxy is the HTTP proxy server.
 type Proxy struct {
 	config  *Config
@@ -193,10 +212,34 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	logDebugHTTPRequest(p.config.DebugHTTP, "inbound", r, bodyBytes)
 
+	startedAt := time.Now()
+	headers := extractHeaders(r)
+	sessionID := GetSessionIDFromHeader(headers)
+	if sessionID == "" {
+		sessionID = DeriveSessionID(chatReq.Messages)
+	}
+
 	// 2. Dedup check
 	dedupKey := DedupHash(bodyBytes)
+	trace := &transcriptTrace{
+		ID:             dedupKey,
+		SessionID:      sessionID,
+		RequestedModel: chatReq.Model,
+		Messages:       chatReq.Messages,
+		Stream:         chatReq.Stream,
+	}
 	if cached := p.dedup.GetCached(dedupKey); cached != nil {
 		log.Printf("dedup hit key=%s", dedupKey)
+		parsed := parseTranscriptResponse(cached.Body, chatReq.Stream)
+		trace.Source = "dedup_cache"
+		trace.FinalModel = parsed.Model
+		trace.Status = cached.Status
+		trace.Duration = time.Since(startedAt)
+		trace.Assistant = parsed.Assistant
+		trace.Usage = parsed.Usage
+		trace.FinishReason = parsed.FinishReason
+		trace.Error = parsed.Error
+		logDebugTranscript(p.config.DebugTranscript, trace)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(cached.Status)
 		w.Write(cached.Body)
@@ -205,6 +248,16 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if ch := p.dedup.GetInflight(dedupKey); ch != nil {
 		log.Printf("dedup waiting key=%s", dedupKey)
 		result := <-ch
+		parsed := parseTranscriptResponse(result.Body, chatReq.Stream)
+		trace.Source = "dedup_wait"
+		trace.FinalModel = parsed.Model
+		trace.Status = result.Status
+		trace.Duration = time.Since(startedAt)
+		trace.Assistant = parsed.Assistant
+		trace.Usage = parsed.Usage
+		trace.FinishReason = parsed.FinishReason
+		trace.Error = parsed.Error
+		logDebugTranscript(p.config.DebugTranscript, trace)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(result.Status)
 		w.Write(result.Body)
@@ -220,19 +273,19 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if isAutoRoute {
 		decision = p.routeRequest(&chatReq, model)
 		model = decision.Model
+		trace.Tier = string(decision.Tier)
+		trace.Confidence = decision.Confidence
+		trace.RouteReason = decision.Reasoning
 	}
 
 	// 4. Session pinning
-	sessionID := GetSessionIDFromHeader(extractHeaders(r))
-	if sessionID == "" {
-		sessionID = DeriveSessionID(chatReq.Messages)
-	}
 	if sessionID != "" && isAutoRoute {
 		if entry := p.session.Get(sessionID); entry != nil {
 			model = entry.Model
 			log.Printf("session pinned session=%s model=%s", sessionID, model)
 		}
 	}
+	trace.SelectedModel = model
 
 	// 5. Response cache check (non-streaming only)
 	if !chatReq.Stream {
@@ -240,6 +293,16 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if cached := p.cache.Get(cacheKey); cached != nil {
 			log.Printf("cache hit model=%s", cached.Model)
 			p.dedup.Complete(dedupKey, &CachedResponse{Status: cached.Status, Body: cached.Body})
+			parsed := parseTranscriptResponse(cached.Body, false)
+			trace.Source = "cache"
+			trace.FinalModel = firstNonEmpty(cached.Model, parsed.Model)
+			trace.Status = cached.Status
+			trace.Duration = time.Since(startedAt)
+			trace.Assistant = parsed.Assistant
+			trace.Usage = parsed.Usage
+			trace.FinishReason = parsed.FinishReason
+			trace.Error = parsed.Error
+			logDebugTranscript(p.config.DebugTranscript, trace)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(cached.Status)
 			w.Write(cached.Body)
@@ -258,18 +321,25 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 7. Forward with fallback
 	var lastErr error
+	var attempts []transcriptAttempt
 	for i, tryModel := range fallbackChain {
 		if i >= maxFallbackAttempts {
 			break
 		}
 
+		var result *forwardResult
 		if chatReq.Stream {
-			err = p.forwardStreaming(w, bodyBytes, tryModel, dedupKey)
+			result, err = p.forwardStreaming(w, bodyBytes, tryModel, dedupKey)
 		} else {
-			err = p.forwardNonStreaming(w, bodyBytes, tryModel, dedupKey)
+			result, err = p.forwardNonStreaming(w, bodyBytes, tryModel, dedupKey)
 		}
 
 		if err == nil {
+			attempts = append(attempts, transcriptAttempt{
+				Model:    tryModel,
+				Status:   result.Status,
+				Duration: result.Duration,
+			})
 			// Update session
 			if sessionID != "" && isAutoRoute {
 				tier := "MEDIUM"
@@ -282,9 +352,28 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				log.Printf("routed tier=%s model=%s confidence=%.2f savings=%.0f%%",
 					decision.Tier, tryModel, decision.Confidence, decision.Savings*100)
 			}
+			trace.Source = "upstream"
+			trace.FinalModel = firstNonEmpty(result.Parsed.Model, tryModel)
+			trace.Status = result.Status
+			trace.Duration = time.Since(startedAt)
+			trace.Assistant = result.Parsed.Assistant
+			trace.Usage = result.Parsed.Usage
+			trace.FinishReason = result.Parsed.FinishReason
+			trace.Error = result.Parsed.Error
+			trace.Attempts = attempts
+			logDebugTranscript(p.config.DebugTranscript, trace)
 			return
 		}
 
+		attempt := transcriptAttempt{Model: tryModel}
+		if attemptErr, ok := err.(*upstreamAttemptError); ok {
+			attempt.Status = attemptErr.Status
+			attempt.Duration = attemptErr.Duration
+			attempt.Err = attemptErr.Error()
+		} else if err != nil {
+			attempt.Err = err.Error()
+		}
+		attempts = append(attempts, attempt)
 		log.Printf("fallback model=%s err=%v next=%d", tryModel, err, i+1)
 		lastErr = err
 	}
@@ -297,6 +386,12 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			Type:    "upstream_error",
 		},
 	})
+	trace.Source = "upstream_error"
+	trace.Status = http.StatusBadGateway
+	trace.Duration = time.Since(startedAt)
+	trace.Error = fmt.Sprintf("all models failed: %v", lastErr)
+	trace.Attempts = attempts
+	logDebugTranscript(p.config.DebugTranscript, trace)
 }
 
 func (p *Proxy) routeRequest(req *schema.ChatCompletionRequest, profileModel string) *schema.RoutingDecision {
@@ -354,13 +449,14 @@ func (p *Proxy) chatURL() string {
 	return openRouterChatURL
 }
 
-func (p *Proxy) forwardNonStreaming(w http.ResponseWriter, body []byte, model string, dedupKey string) error {
+func (p *Proxy) forwardNonStreaming(w http.ResponseWriter, body []byte, model string, dedupKey string) (*forwardResult, error) {
 	// Rewrite model in body
 	reqBody := rewriteModel(body, model)
+	startedAt := time.Now()
 
 	req, err := http.NewRequest("POST", p.chatURL(), bytes.NewReader(reqBody))
 	if err != nil {
-		return err
+		return nil, &upstreamAttemptError{Duration: time.Since(startedAt), Err: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.config.APIKey)
@@ -371,19 +467,23 @@ func (p *Proxy) forwardNonStreaming(w http.ResponseWriter, body []byte, model st
 	resp, err := p.client.Do(req)
 	if err != nil {
 		logDebugHTTPError(p.config.DebugHTTP, "openrouter", req, err)
-		return err
+		return nil, &upstreamAttemptError{Duration: time.Since(startedAt), Err: err}
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return nil, &upstreamAttemptError{Duration: time.Since(startedAt), Err: err}
 	}
 	logDebugHTTPResponse(p.config.DebugHTTP, "openrouter", resp, respBody)
 
 	// Check for retryable errors
 	if resp.StatusCode == 429 || resp.StatusCode >= 500 {
-		return fmt.Errorf("upstream error: %d", resp.StatusCode)
+		return nil, &upstreamAttemptError{
+			Status:   resp.StatusCode,
+			Duration: time.Since(startedAt),
+			Err:      fmt.Errorf("upstream error: %d", resp.StatusCode),
+		}
 	}
 
 	// Cache response
@@ -401,16 +501,21 @@ func (p *Proxy) forwardNonStreaming(w http.ResponseWriter, body []byte, model st
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
-	return nil
+	return &forwardResult{
+		Status:   resp.StatusCode,
+		Duration: time.Since(startedAt),
+		Parsed:   parseTranscriptResponse(respBody, false),
+	}, nil
 }
 
-func (p *Proxy) forwardStreaming(w http.ResponseWriter, body []byte, model string, dedupKey string) error {
+func (p *Proxy) forwardStreaming(w http.ResponseWriter, body []byte, model string, dedupKey string) (*forwardResult, error) {
 	// Rewrite model and ensure stream=true
 	reqBody := rewriteModel(body, model)
+	startedAt := time.Now()
 
 	req, err := http.NewRequest("POST", p.chatURL(), bytes.NewReader(reqBody))
 	if err != nil {
-		return err
+		return nil, &upstreamAttemptError{Duration: time.Since(startedAt), Err: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.config.APIKey)
@@ -421,14 +526,18 @@ func (p *Proxy) forwardStreaming(w http.ResponseWriter, body []byte, model strin
 	resp, err := p.client.Do(req)
 	if err != nil {
 		logDebugHTTPError(p.config.DebugHTTP, "openrouter", req, err)
-		return err
+		return nil, &upstreamAttemptError{Duration: time.Since(startedAt), Err: err}
 	}
 
 	// Check for retryable errors before starting stream
 	if resp.StatusCode == 429 || resp.StatusCode >= 500 {
 		logDebugHTTPResponse(p.config.DebugHTTP, "openrouter", resp, nil)
 		resp.Body.Close()
-		return fmt.Errorf("upstream error: %d", resp.StatusCode)
+		return nil, &upstreamAttemptError{
+			Status:   resp.StatusCode,
+			Duration: time.Since(startedAt),
+			Err:      fmt.Errorf("upstream error: %d", resp.StatusCode),
+		}
 	}
 	logDebugHTTPResponse(p.config.DebugHTTP, "openrouter", resp, nil)
 
@@ -481,7 +590,11 @@ func (p *Proxy) forwardStreaming(w http.ResponseWriter, body []byte, model strin
 		Body:   allData.Bytes(),
 	})
 
-	return nil
+	return &forwardResult{
+		Status:   resp.StatusCode,
+		Duration: time.Since(startedAt),
+		Parsed:   parseTranscriptResponse(allData.Bytes(), true),
+	}, nil
 }
 
 // rewriteModel replaces the model field in the JSON body.
@@ -523,4 +636,13 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
