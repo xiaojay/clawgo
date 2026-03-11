@@ -33,6 +33,11 @@ func main() {
 				EnvVars: []string{"CLAWGO_PROFILE"},
 				Usage:   "Routing profile (auto/eco/premium)",
 			},
+			&cli.BoolFlag{
+				Name:    "debug-http",
+				EnvVars: []string{"CLAWGO_DEBUG_HTTP"},
+				Usage:   "Log inbound requests and OpenRouter HTTP traffic",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			cfg := clawgo.LoadConfig()
@@ -44,6 +49,9 @@ func main() {
 			}
 			if c.IsSet("profile") {
 				cfg.Profile = c.String("profile")
+			}
+			if c.IsSet("debug-http") {
+				cfg.DebugHTTP = c.Bool("debug-http")
 			}
 
 			app := clawgo.New(cfg)

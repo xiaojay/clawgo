@@ -108,6 +108,7 @@ func isAddrInUse(err error) bool {
 }
 
 func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {
+	logDebugHTTPRequest(p.config.DebugHTTP, "inbound", r, nil)
 	bal, _ := p.balance.GetBalance()
 	resp := schema.HealthResponse{
 		Status:  "ok",
@@ -121,6 +122,7 @@ func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
+	logDebugHTTPRequest(p.config.DebugHTTP, "inbound", r, nil)
 	modelsURL := openRouterModelsURLProxy
 	if p.baseURL != "" {
 		modelsURL = p.baseURL + "/v1/models"
@@ -134,9 +136,11 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+p.config.APIKey)
+	logDebugHTTPRequest(p.config.DebugHTTP, "openrouter", req, nil)
 
 	resp, err := client.Do(req)
 	if err != nil {
+		logDebugHTTPError(p.config.DebugHTTP, "openrouter", req, err)
 		writeJSON(w, http.StatusBadGateway, schema.ErrorResponse{
 			Error: schema.ErrorDetail{Message: err.Error(), Type: "upstream_error"},
 		})
@@ -144,13 +148,22 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, schema.ErrorResponse{
+			Error: schema.ErrorDetail{Message: err.Error(), Type: "upstream_error"},
+		})
+		return
+	}
+	logDebugHTTPResponse(p.config.DebugHTTP, "openrouter", resp, respBody)
+
 	for k, v := range resp.Header {
 		if len(v) > 0 {
 			w.Header().Set(k, v[0])
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	w.Write(respBody)
 }
 
 func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -172,11 +185,13 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	var chatReq schema.ChatCompletionRequest
 	if err := json.Unmarshal(bodyBytes, &chatReq); err != nil {
+		logDebugHTTPRequest(p.config.DebugHTTP, "inbound", r, bodyBytes)
 		writeJSON(w, http.StatusBadRequest, schema.ErrorResponse{
 			Error: schema.ErrorDetail{Message: "invalid JSON", Type: "invalid_request"},
 		})
 		return
 	}
+	logDebugHTTPRequest(p.config.DebugHTTP, "inbound", r, bodyBytes)
 
 	// 2. Dedup check
 	dedupKey := DedupHash(bodyBytes)
@@ -351,9 +366,11 @@ func (p *Proxy) forwardNonStreaming(w http.ResponseWriter, body []byte, model st
 	req.Header.Set("Authorization", "Bearer "+p.config.APIKey)
 	req.Header.Set("HTTP-Referer", "https://github.com/anthropics/clawgo")
 	req.Header.Set("X-Title", "ClawGo")
+	logDebugHTTPRequest(p.config.DebugHTTP, "openrouter", req, reqBody)
 
 	resp, err := p.client.Do(req)
 	if err != nil {
+		logDebugHTTPError(p.config.DebugHTTP, "openrouter", req, err)
 		return err
 	}
 	defer resp.Body.Close()
@@ -362,6 +379,7 @@ func (p *Proxy) forwardNonStreaming(w http.ResponseWriter, body []byte, model st
 	if err != nil {
 		return err
 	}
+	logDebugHTTPResponse(p.config.DebugHTTP, "openrouter", resp, respBody)
 
 	// Check for retryable errors
 	if resp.StatusCode == 429 || resp.StatusCode >= 500 {
@@ -398,17 +416,21 @@ func (p *Proxy) forwardStreaming(w http.ResponseWriter, body []byte, model strin
 	req.Header.Set("Authorization", "Bearer "+p.config.APIKey)
 	req.Header.Set("HTTP-Referer", "https://github.com/anthropics/clawgo")
 	req.Header.Set("X-Title", "ClawGo")
+	logDebugHTTPRequest(p.config.DebugHTTP, "openrouter", req, reqBody)
 
 	resp, err := p.client.Do(req)
 	if err != nil {
+		logDebugHTTPError(p.config.DebugHTTP, "openrouter", req, err)
 		return err
 	}
 
 	// Check for retryable errors before starting stream
 	if resp.StatusCode == 429 || resp.StatusCode >= 500 {
+		logDebugHTTPResponse(p.config.DebugHTTP, "openrouter", resp, nil)
 		resp.Body.Close()
 		return fmt.Errorf("upstream error: %d", resp.StatusCode)
 	}
+	logDebugHTTPResponse(p.config.DebugHTTP, "openrouter", resp, nil)
 
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -443,6 +465,7 @@ func (p *Proxy) forwardStreaming(w http.ResponseWriter, body []byte, model strin
 	var allData bytes.Buffer
 	for scanner.Scan() {
 		line := scanner.Text()
+		logDebugHTTPStreamChunk(p.config.DebugHTTP, "openrouter", p.chatURL(), line)
 		fmt.Fprintf(w, "%s\n", line)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()

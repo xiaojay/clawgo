@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -331,4 +332,52 @@ func TestEndToEndStreaming(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Header().Get("Content-Type"), "text/event-stream")
 	assert.Contains(t, w.Body.String(), "data: [DONE]")
+}
+
+func TestDebugHTTPLogging(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":     "chatcmpl-test",
+			"object": "chat.completion",
+			"model":  "google/gemini-2.5-flash",
+			"choices": []map[string]interface{}{
+				{
+					"index":         0,
+					"message":       map[string]string{"role": "assistant", "content": "Hello!"},
+					"finish_reason": "stop",
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	proxy, cleanup := newTestProxy("test-key", mock.URL)
+	defer cleanup()
+	proxy.config.DebugHTTP = true
+
+	var logBuf bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(oldWriter)
+
+	chatReq := schema.ChatCompletionRequest{
+		Model: "google/gemini-2.5-flash",
+		Messages: []schema.ChatMessage{
+			{Role: "user", Content: "hello"},
+		},
+	}
+	bodyBytes, err := json.Marshal(chatReq)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, logBuf.String(), "debug_http inbound_request method=POST url=/v1/chat/completions")
+	assert.Contains(t, logBuf.String(), "debug_http openrouter_request method=POST url="+mock.URL+"/v1/chat/completions")
+	assert.Contains(t, logBuf.String(), `Authorization=["Bearer <redacted>"]`)
+	assert.NotContains(t, logBuf.String(), "Bearer test-key")
 }

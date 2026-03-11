@@ -29,6 +29,8 @@ func New(cfg *Config) *ClawGo {
 	router := NewRouter()
 	catalog := NewModelCatalog()
 	balance := NewBalanceMonitor(cfg.APIKey, 30*time.Second)
+	catalog.debugHTTP = cfg.DebugHTTP
+	balance.debugHTTP = cfg.DebugHTTP
 	session := NewSessionStore(30 * time.Minute)
 	dedup := NewDeduplicator(30 * time.Second)
 	cache := NewResponseCache(200, 10*time.Minute, 1048576)
@@ -71,6 +73,7 @@ func (c *ClawGo) Run() error {
 	fmt.Printf("\n  ClawGo v%s\n", Version)
 	fmt.Printf("  Smart LLM Router → OpenRouter\n")
 	fmt.Printf("  Profile: %s\n", c.config.Profile)
+	fmt.Printf("  Debug HTTP: %t\n", c.config.DebugHTTP)
 	fmt.Printf("  Models: %d loaded\n", c.catalog.Count())
 	fmt.Printf("  Listening: http://localhost:%d\n\n", c.config.Port)
 

@@ -3,6 +3,7 @@ package clawgo
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -16,8 +17,9 @@ const openRouterModelsURL = "https://openrouter.ai/api/v1/models"
 
 // ModelCatalog holds all available models fetched from OpenRouter.
 type ModelCatalog struct {
-	mu     sync.RWMutex
-	models map[string]*schema.ModelInfo
+	mu        sync.RWMutex
+	models    map[string]*schema.ModelInfo
+	debugHTTP bool
 }
 
 func NewModelCatalog() *ModelCatalog {
@@ -34,19 +36,27 @@ func (c *ModelCatalog) FetchModels(apiKey string) error {
 		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
+	logDebugHTTPRequest(c.debugHTTP, "openrouter", req, nil)
 
 	resp, err := client.Do(req)
 	if err != nil {
+		logDebugHTTPError(c.debugHTTP, "openrouter", req, err)
 		return fmt.Errorf("fetch models: %w", err)
 	}
 	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read models: %w", err)
+	}
+	logDebugHTTPResponse(c.debugHTTP, "openrouter", resp, respBody)
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("fetch models: status %d", resp.StatusCode)
 	}
 
 	var result schema.OpenRouterModelsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(respBody, &result); err != nil {
 		return fmt.Errorf("decode models: %w", err)
 	}
 

@@ -9,13 +9,14 @@ import (
 )
 
 type Config struct {
-	APIKey             string `yaml:"-"`
-	Port               int64  `yaml:"port"`
-	Profile            string `yaml:"profile"`
-	RequestTimeoutSec  int64  `yaml:"request_timeout_sec"`
-	ModelsTimeoutSec   int64  `yaml:"models_timeout_sec"`
-	ConfigPath         string `yaml:"-"`
-	Profiles map[string]ProfileFileConfig `yaml:"profiles,omitempty"`
+	APIKey            string                       `yaml:"-"`
+	Port              int64                        `yaml:"port"`
+	Profile           string                       `yaml:"profile"`
+	DebugHTTP         bool                         `yaml:"debug_http"`
+	RequestTimeoutSec int64                        `yaml:"request_timeout_sec"`
+	ModelsTimeoutSec  int64                        `yaml:"models_timeout_sec"`
+	ConfigPath        string                       `yaml:"-"`
+	Profiles          map[string]ProfileFileConfig `yaml:"profiles,omitempty"`
 }
 
 type ProfileFileConfig struct {
@@ -49,6 +50,11 @@ func LoadConfig() *Config {
 	}
 	if profile := os.Getenv("CLAWGO_PROFILE"); profile != "" {
 		cfg.Profile = profile
+	}
+	if debugHTTP := os.Getenv("CLAWGO_DEBUG_HTTP"); debugHTTP != "" {
+		if v, err := strconv.ParseBool(debugHTTP); err == nil {
+			cfg.DebugHTTP = v
+		}
 	}
 	if timeout := os.Getenv("CLAWGO_REQUEST_TIMEOUT_SEC"); timeout != "" {
 		if v, err := strconv.ParseInt(timeout, 10, 64); err == nil && v > 0 {
@@ -84,6 +90,9 @@ func (c *Config) loadFile() {
 	}
 	if c.Profile == "auto" && fileCfg.Profile != "" {
 		c.Profile = fileCfg.Profile
+	}
+	if !c.DebugHTTP && fileCfg.DebugHTTP {
+		c.DebugHTTP = true
 	}
 	if c.RequestTimeoutSec == 45 && fileCfg.RequestTimeoutSec > 0 {
 		c.RequestTimeoutSec = fileCfg.RequestTimeoutSec

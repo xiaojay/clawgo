@@ -3,6 +3,7 @@ package clawgo
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ const openRouterAuthURL = "https://openrouter.ai/api/v1/auth/key"
 type BalanceMonitor struct {
 	apiKey    string
 	cacheTTL  time.Duration
+	debugHTTP bool
 
 	mu            sync.RWMutex
 	cachedBalance float64
@@ -44,19 +46,27 @@ func (b *BalanceMonitor) GetBalance() (float64, error) {
 		return 0, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+b.apiKey)
+	logDebugHTTPRequest(b.debugHTTP, "openrouter", req, nil)
 
 	resp, err := client.Do(req)
 	if err != nil {
+		logDebugHTTPError(b.debugHTTP, "openrouter", req, err)
 		return 0, fmt.Errorf("fetch balance: %w", err)
 	}
 	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("read balance: %w", err)
+	}
+	logDebugHTTPResponse(b.debugHTTP, "openrouter", resp, respBody)
 
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("fetch balance: status %d", resp.StatusCode)
 	}
 
 	var result schema.OpenRouterKeyResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(respBody, &result); err != nil {
 		return 0, fmt.Errorf("decode balance: %w", err)
 	}
 
