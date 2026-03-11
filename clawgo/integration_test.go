@@ -84,6 +84,78 @@ func TestIsRoutingProfile(t *testing.T) {
 	assert.False(t, isRoutingProfile("anthropic/claude-sonnet-4"))
 }
 
+func TestEndToEndCustomProfileRoutingAndFallback(t *testing.T) {
+	var attemptedModels []string
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/chat/completions":
+			var req schema.ChatCompletionRequest
+			err := json.NewDecoder(r.Body).Decode(&req)
+			require.NoError(t, err)
+
+			attemptedModels = append(attemptedModels, req.Model)
+			if len(attemptedModels) == 1 {
+				assert.Equal(t, "custom/primary", req.Model)
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"error":"retry me"}`))
+				return
+			}
+
+			assert.Equal(t, "custom/fallback", req.Model)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":     "chatcmpl-custom",
+				"object": "chat.completion",
+				"model":  req.Model,
+				"choices": []map[string]interface{}{
+					{
+						"index":         0,
+						"message":       map[string]string{"role": "assistant", "content": "4"},
+						"finish_reason": "stop",
+					},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mock.Close()
+
+	proxy, cleanup := newTestProxy("test-key", mock.URL)
+	defer cleanup()
+	proxy.config.Profiles = map[string]ProfileFileConfig{
+		"my-custom": {
+			Simple:    []string{"custom/primary", "custom/fallback"},
+			Medium:    []string{"custom/primary", "custom/fallback"},
+			Complex:   []string{"custom/primary", "custom/fallback"},
+			Reasoning: []string{"custom/primary", "custom/fallback"},
+		},
+	}
+
+	chatReq := schema.ChatCompletionRequest{
+		Model: "clawgo/my-custom",
+		Messages: []schema.ChatMessage{
+			{Role: "user", Content: "what is 2+2?"},
+		},
+	}
+	bodyBytes, err := json.Marshal(chatReq)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, []string{"custom/primary", "custom/fallback"}, attemptedModels)
+
+	var resp schema.ChatCompletionResponse
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, "custom/fallback", resp.Model)
+}
+
 func TestRewriteModel(t *testing.T) {
 	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"hello"}]}`)
 	rewritten := rewriteModel(body, "google/gemini-2.5-flash")

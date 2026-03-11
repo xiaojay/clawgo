@@ -267,11 +267,13 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Resolve model
 	model := chatReq.Model
-	isAutoRoute := isRoutingProfile(model)
+	profile, isAutoRoute := p.config.ResolveRoutingProfile(model)
+	var tierConfigs map[schema.Tier]schema.TierConfig
 
 	var decision *schema.RoutingDecision
 	if isAutoRoute {
-		decision = p.routeRequest(&chatReq, model)
+		tierConfigs = p.config.TierConfigs(profile)
+		decision = p.routeRequest(&chatReq, profile, tierConfigs)
 		model = decision.Model
 		trace.Tier = string(decision.Tier)
 		trace.Confidence = decision.Confidence
@@ -311,7 +313,6 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 6. Get fallback chain
-	tierConfigs := DefaultTierConfigs(p.config.Profile)
 	var fallbackChain []string
 	if decision != nil {
 		fallbackChain = GetFallbackChain(decision.Tier, tierConfigs)
@@ -394,7 +395,7 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	logDebugTranscript(p.config.DebugTranscript, trace)
 }
 
-func (p *Proxy) routeRequest(req *schema.ChatCompletionRequest, profileModel string) *schema.RoutingDecision {
+func (p *Proxy) routeRequest(req *schema.ChatCompletionRequest, profile string, tierConfigs map[schema.Tier]schema.TierConfig) *schema.RoutingDecision {
 	// Extract last user message as prompt
 	prompt := ""
 	systemPrompt := ""
@@ -413,16 +414,6 @@ func (p *Proxy) routeRequest(req *schema.ChatCompletionRequest, profileModel str
 
 	// Classify
 	result := p.router.Classify(prompt, systemPrompt, estimatedTokens)
-
-	// Resolve profile
-	profile := p.config.Profile
-	if strings.Contains(profileModel, "eco") {
-		profile = "eco"
-	} else if strings.Contains(profileModel, "premium") {
-		profile = "premium"
-	}
-
-	tierConfigs := DefaultTierConfigs(profile)
 
 	// Determine tier
 	tier := schema.TierMedium // default for ambiguous
