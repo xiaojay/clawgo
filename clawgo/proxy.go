@@ -4,21 +4,25 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/anthropics/clawgo/clawgo/schema"
 )
 
 const (
-	openRouterChatURL         = "https://openrouter.ai/api/v1/chat/completions"
-	openRouterModelsURLProxy  = "https://openrouter.ai/api/v1/models"
-	heartbeatInterval         = 2 * time.Second
-	maxFallbackAttempts       = 5
+	openRouterChatURL        = "https://openrouter.ai/api/v1/chat/completions"
+	openRouterModelsURLProxy = "https://openrouter.ai/api/v1/models"
+	heartbeatInterval        = 2 * time.Second
+	maxFallbackAttempts      = 5
 )
 
 // Proxy is the HTTP proxy server.
@@ -63,9 +67,44 @@ func NewProxy(cfg *Config, router *Router, catalog *ModelCatalog, balance *Balan
 
 // Run starts the proxy on the configured port.
 func (p *Proxy) Run() error {
+	ln, err := p.Listen()
+	if err != nil {
+		return err
+	}
+	return p.Serve(ln)
+}
+
+// Listen binds the configured TCP port and returns the listener.
+func (p *Proxy) Listen() (net.Listener, error) {
 	addr := fmt.Sprintf(":%d", p.config.Port)
-	log.Printf("proxy started addr=%s profile=%s models=%d", addr, p.config.Profile, p.catalog.Count())
-	return http.ListenAndServe(addr, p.mux)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		if isAddrInUse(err) {
+			return nil, fmt.Errorf("port %d is already in use; set --port or CLAWGO_PORT to a free port", p.config.Port)
+		}
+		return nil, err
+	}
+	return ln, nil
+}
+
+// Serve starts serving requests on an existing listener.
+func (p *Proxy) Serve(ln net.Listener) error {
+	log.Printf("proxy started addr=%s profile=%s models=%d", ln.Addr().String(), p.config.Profile, p.catalog.Count())
+	return http.Serve(ln, p.mux)
+}
+
+func isAddrInUse(err error) bool {
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) {
+		return false
+	}
+
+	var sysErr *os.SyscallError
+	if !errors.As(opErr.Err, &sysErr) {
+		return false
+	}
+
+	return errors.Is(sysErr.Err, syscall.EADDRINUSE)
 }
 
 func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {

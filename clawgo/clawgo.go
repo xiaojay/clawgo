@@ -49,6 +49,11 @@ func New(cfg *Config) *ClawGo {
 
 // Run starts the ClawGo proxy server.
 func (c *ClawGo) Run() error {
+	ln, err := c.proxy.Listen()
+	if err != nil {
+		return err
+	}
+
 	// Fetch models from OpenRouter
 	log.Printf("fetching models from OpenRouter...")
 	if err := c.catalog.FetchModels(c.config.APIKey); err != nil {
@@ -69,7 +74,7 @@ func (c *ClawGo) Run() error {
 	fmt.Printf("  Models: %d loaded\n", c.catalog.Count())
 	fmt.Printf("  Listening: http://localhost:%d\n\n", c.config.Port)
 
-	return c.proxy.Run()
+	return c.proxy.Serve(ln)
 }
 
 // Close gracefully shuts down all components.

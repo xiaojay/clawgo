@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -188,6 +189,22 @@ func TestEndToEndMethodNotAllowed(t *testing.T) {
 	proxy.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+}
+
+func TestListenReturnsHelpfulPortConflictError(t *testing.T) {
+	occupied, err := net.Listen("tcp", ":0")
+	require.NoError(t, err)
+	defer occupied.Close()
+
+	proxy, cleanup := newTestProxy("test-key", "")
+	defer cleanup()
+	proxy.config.Port = int64(occupied.Addr().(*net.TCPAddr).Port)
+
+	_, err = proxy.Listen()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already in use")
+	assert.Contains(t, err.Error(), "--port")
+	assert.Contains(t, err.Error(), "CLAWGO_PORT")
 }
 
 func TestEndToEndInvalidJSON(t *testing.T) {
