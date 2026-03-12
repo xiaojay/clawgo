@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,9 +22,10 @@ import (
 const (
 	openRouterChatURL        = "https://openrouter.ai/api/v1/chat/completions"
 	openRouterModelsURLProxy = "https://openrouter.ai/api/v1/models"
-	heartbeatInterval        = 2 * time.Second
 	maxFallbackAttempts      = 5
 )
+
+var heartbeatInterval = 2 * time.Second
 
 type forwardResult struct {
 	Status   int
@@ -537,22 +539,39 @@ func (p *Proxy) forwardStreaming(w http.ResponseWriter, body []byte, model strin
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(resp.StatusCode)
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
+	flusher, _ := w.(http.Flusher)
+	var writeMu sync.Mutex
+	flushLocked := func() {
+		if flusher != nil {
+			flusher.Flush()
+		}
 	}
+	writeLine := func(line string) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		fmt.Fprintf(w, "%s\n", line)
+		flushLocked()
+	}
+	writeRaw := func(raw string) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		fmt.Fprint(w, raw)
+		flushLocked()
+	}
+	writeMu.Lock()
+	flushLocked()
+	writeMu.Unlock()
 
 	// Stream with heartbeat
 	done := make(chan struct{})
+	interval := heartbeatInterval
 	go func() {
-		ticker := time.NewTicker(heartbeatInterval)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				fmt.Fprintf(w, ": heartbeat\n\n")
-				if f, ok := w.(http.Flusher); ok {
-					f.Flush()
-				}
+				writeRaw(": heartbeat\n\n")
 			case <-done:
 				return
 			}
@@ -566,10 +585,7 @@ func (p *Proxy) forwardStreaming(w http.ResponseWriter, body []byte, model strin
 	for scanner.Scan() {
 		line := scanner.Text()
 		logDebugHTTPStreamChunk(p.config.DebugHTTP, "openrouter", p.chatURL(), line)
-		fmt.Fprintf(w, "%s\n", line)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
+		writeLine(line)
 		allData.WriteString(line + "\n")
 	}
 	resp.Body.Close()

@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,6 +41,69 @@ func newTestProxy(apiKey string, mockURL string) (*Proxy, func()) {
 		session.Close()
 	}
 	return proxy, cleanup
+}
+
+type concurrentWriteRecorder struct {
+	header     http.Header
+	body       bytes.Buffer
+	statusCode int
+	delay      time.Duration
+	active     int32
+	concurrent int32
+	mu         sync.Mutex
+}
+
+func newConcurrentWriteRecorder(delay time.Duration) *concurrentWriteRecorder {
+	return &concurrentWriteRecorder{
+		header: make(http.Header),
+		delay:  delay,
+	}
+}
+
+func (w *concurrentWriteRecorder) Header() http.Header {
+	return w.header
+}
+
+func (w *concurrentWriteRecorder) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+}
+
+func (w *concurrentWriteRecorder) Write(p []byte) (int, error) {
+	w.enterCriticalSection()
+	defer w.leaveCriticalSection()
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
+	}
+	return w.body.Write(p)
+}
+
+func (w *concurrentWriteRecorder) Flush() {
+	w.enterCriticalSection()
+	defer w.leaveCriticalSection()
+}
+
+func (w *concurrentWriteRecorder) enterCriticalSection() {
+	if atomic.AddInt32(&w.active, 1) > 1 {
+		atomic.StoreInt32(&w.concurrent, 1)
+	}
+	time.Sleep(w.delay)
+}
+
+func (w *concurrentWriteRecorder) leaveCriticalSection() {
+	atomic.AddInt32(&w.active, -1)
+}
+
+func (w *concurrentWriteRecorder) BodyString() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.body.String()
+}
+
+func (w *concurrentWriteRecorder) HadConcurrentWrite() bool {
+	return atomic.LoadInt32(&w.concurrent) != 0
 }
 
 func TestHealthEndpoint(t *testing.T) {
@@ -404,6 +469,60 @@ func TestEndToEndStreaming(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Header().Get("Content-Type"), "text/event-stream")
 	assert.Contains(t, w.Body.String(), "data: [DONE]")
+}
+
+func TestEndToEndStreamingSerializesHeartbeatWrites(t *testing.T) {
+	oldHeartbeatInterval := heartbeatInterval
+	heartbeatInterval = 10 * time.Millisecond
+	defer func() {
+		heartbeatInterval = oldHeartbeatInterval
+	}()
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok)
+		flusher.Flush()
+
+		chunks := []string{
+			`data: {"id":"chatcmpl-1","choices":[{"delta":{"role":"assistant"},"index":0}]}`,
+			`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Hi"},"index":0}]}`,
+			`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":" there"},"index":0}]}`,
+			`data: [DONE]`,
+		}
+		for i, chunk := range chunks {
+			fmt.Fprintf(w, "%s\n\n", chunk)
+			flusher.Flush()
+			if i < len(chunks)-1 {
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+	}))
+	defer mock.Close()
+
+	proxy, cleanup := newTestProxy("test-key", mock.URL)
+	defer cleanup()
+
+	chatReq := schema.ChatCompletionRequest{
+		Model:  "openai/gpt-4",
+		Stream: true,
+		Messages: []schema.ChatMessage{
+			{Role: "user", Content: "hello"},
+		},
+	}
+	bodyBytes, err := json.Marshal(chatReq)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w := newConcurrentWriteRecorder(15 * time.Millisecond)
+	proxy.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.statusCode)
+	assert.False(t, w.HadConcurrentWrite(), "stream and heartbeat must not write the response concurrently")
+	assert.Contains(t, w.Header().Get("Content-Type"), "text/event-stream")
+	assert.Contains(t, w.BodyString(), "data: [DONE]")
 }
 
 func TestDebugHTTPLogging(t *testing.T) {

@@ -2,7 +2,7 @@ port: 8402
 
 # 默认路由配置。
 # 当请求里传 model=auto 时，会使用这里指定的 profile。
-profile: auto
+profile: balanced
 
 debug_http: false
 debug_transcript: false
