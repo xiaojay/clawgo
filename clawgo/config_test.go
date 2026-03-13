@@ -37,6 +37,24 @@ func TestConfigFromEnv(t *testing.T) {
 	assert.True(t, cfg.DebugTranscript)
 }
 
+func TestLoadConfig_InternalSharedSecret(t *testing.T) {
+	t.Setenv("CLAWGO_INTERNAL_SHARED_SECRET", "my-secret")
+	cfg := LoadConfig()
+	assert.Equal(t, "my-secret", cfg.InternalSharedSecret)
+}
+
+func TestLoadConfig_BraveAPIKey(t *testing.T) {
+	t.Setenv("BRAVE_API_KEY", "brave-key-123")
+	cfg := LoadConfig()
+	assert.Equal(t, "brave-key-123", cfg.BraveAPIKey)
+}
+
+func TestLoadConfig_UsageDSN(t *testing.T) {
+	t.Setenv("CLAWGO_USAGE_DSN", "user:pass@tcp(db:3306)/hosting")
+	cfg := LoadConfig()
+	assert.Equal(t, "user:pass@tcp(db:3306)/hosting", cfg.UsageDSN)
+}
+
 func TestResolveRoutingProfileUsesConfiguredDefault(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Profile = "my-custom"

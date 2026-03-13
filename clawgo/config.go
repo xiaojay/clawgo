@@ -18,8 +18,11 @@ type Config struct {
 	DebugTranscript   bool                         `yaml:"debug_transcript"`
 	RequestTimeoutSec int64                        `yaml:"request_timeout_sec"`
 	ModelsTimeoutSec  int64                        `yaml:"models_timeout_sec"`
-	ConfigPath        string                       `yaml:"-"`
-	Profiles          map[string]ProfileFileConfig `yaml:"profiles,omitempty"`
+	ConfigPath           string                       `yaml:"-"`
+	Profiles             map[string]ProfileFileConfig `yaml:"profiles,omitempty"`
+	InternalSharedSecret string                       `yaml:"-"`
+	BraveAPIKey          string                       `yaml:"-"`
+	UsageDSN             string                       `yaml:"-"`
 }
 
 type ProfileFileConfig struct {
@@ -76,6 +79,15 @@ func LoadConfig() *Config {
 	}
 	if configPath := os.Getenv("CLAWGO_CONFIG"); configPath != "" {
 		cfg.ConfigPath = configPath
+	}
+	if v := os.Getenv("CLAWGO_INTERNAL_SHARED_SECRET"); v != "" {
+		cfg.InternalSharedSecret = v
+	}
+	if v := os.Getenv("BRAVE_API_KEY"); v != "" {
+		cfg.BraveAPIKey = v
+	}
+	if v := os.Getenv("CLAWGO_USAGE_DSN"); v != "" {
+		cfg.UsageDSN = v
 	}
 
 	cfg.loadFile()

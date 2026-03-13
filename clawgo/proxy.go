@@ -55,6 +55,8 @@ type Proxy struct {
 	session *SessionStore
 	dedup   *Deduplicator
 	cache   *ResponseCache
+	search  *SearchHandler
+	usage   *UsageRecorder
 	mux     *http.ServeMux
 	client  *http.Client
 	baseURL string // override for testing; empty uses production URLs
@@ -79,11 +81,23 @@ func NewProxy(cfg *Config, router *Router, catalog *ModelCatalog, balance *Balan
 		client:  &http.Client{Timeout: time.Duration(cfg.RequestTimeoutSec) * time.Second},
 	}
 
-	p.mux.HandleFunc("/v1/chat/completions", p.handleChatCompletions)
-	p.mux.HandleFunc("/health", p.handleHealth)
-	p.mux.HandleFunc("/v1/models", p.handleModels)
+	p.setupMux()
 
 	return p
+}
+
+// setupMux registers all route handlers on a fresh mux, wrapping
+// /v1/chat/completions with the instance auth middleware.
+func (p *Proxy) setupMux() {
+	p.mux = http.NewServeMux()
+	authMw := InstanceAuthMiddleware(p.config.InternalSharedSecret)
+
+	p.mux.Handle("/v1/chat/completions", authMw(http.HandlerFunc(p.handleChatCompletions)))
+	if p.search != nil {
+		p.mux.Handle("/v1/search", authMw(p.search))
+	}
+	p.mux.HandleFunc("/health", p.handleHealth)
+	p.mux.HandleFunc("/v1/models", p.handleModels)
 }
 
 // Run starts the proxy on the configured port.
@@ -365,6 +379,32 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			trace.Error = result.Parsed.Error
 			trace.Attempts = attempts
 			logDebugTranscript(p.config.DebugTranscript, trace)
+			if p.usage != nil && p.usage.Enabled() {
+				instanceID := InstanceIDFromContext(r.Context())
+				uid := UserIDFromContext(r.Context())
+				usageStatus := "success"
+				if result.Status >= 400 {
+					usageStatus = "error"
+				}
+				var promptTok, completionTok, totalTok int64
+				if result.Parsed.Usage != nil {
+					promptTok = result.Parsed.Usage.PromptTokens
+					completionTok = result.Parsed.Usage.CompletionTokens
+					totalTok = result.Parsed.Usage.TotalTokens
+				}
+				go p.usage.RecordLLM(LLMUsageRecord{
+					InstanceID:       instanceID,
+					UserID:           uid,
+					RequestID:        dedupKey,
+					ModelRequested:   chatReq.Model,
+					ModelResolved:    tryModel,
+					PromptTokens:     promptTok,
+					CompletionTokens: completionTok,
+					TotalTokens:      totalTok,
+					Status:           usageStatus,
+					LatencyMs:        result.Duration.Milliseconds(),
+				})
+			}
 			return
 		}
 
@@ -395,6 +435,19 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	trace.Error = fmt.Sprintf("all models failed: %v", lastErr)
 	trace.Attempts = attempts
 	logDebugTranscript(p.config.DebugTranscript, trace)
+	if p.usage != nil && p.usage.Enabled() {
+		instanceID := InstanceIDFromContext(r.Context())
+		uid := UserIDFromContext(r.Context())
+		go p.usage.RecordLLM(LLMUsageRecord{
+			InstanceID:     instanceID,
+			UserID:         uid,
+			RequestID:      dedupKey,
+			ModelRequested: chatReq.Model,
+			Status:         "error",
+			ErrorCode:      "all_models_failed",
+			LatencyMs:      time.Since(startedAt).Milliseconds(),
+		})
+	}
 }
 
 func (p *Proxy) routeRequest(req *schema.ChatCompletionRequest, profile string, tierConfigs map[schema.Tier]schema.TierConfig) *schema.RoutingDecision {

@@ -18,6 +18,7 @@ type ClawGo struct {
 	session *SessionStore
 	dedup   *Deduplicator
 	cache   *ResponseCache
+	usage   *UsageRecorder
 }
 
 // New creates a new ClawGo instance and initializes all components.
@@ -37,6 +38,17 @@ func New(cfg *Config) *ClawGo {
 
 	proxy := NewProxy(cfg, router, catalog, balance, session, dedup, cache)
 
+	usage := NewUsageRecorder(cfg.UsageDSN)
+	proxy.usage = usage
+
+	// Add search handler if Brave API key is configured
+	if cfg.BraveAPIKey != "" {
+		search := NewSearchHandler(cfg.BraveAPIKey, "")
+		search.usage = usage
+		proxy.search = search
+		proxy.setupMux()
+	}
+
 	return &ClawGo{
 		config:  cfg,
 		proxy:   proxy,
@@ -46,6 +58,7 @@ func New(cfg *Config) *ClawGo {
 		session: session,
 		dedup:   dedup,
 		cache:   cache,
+		usage:   usage,
 	}
 }
 
@@ -83,6 +96,9 @@ func (c *ClawGo) Run() error {
 
 // Close gracefully shuts down all components.
 func (c *ClawGo) Close() {
+	if c.usage != nil {
+		c.usage.Close()
+	}
 	c.session.Close()
 	c.cache.Clear()
 	log.Println("clawgo stopped")

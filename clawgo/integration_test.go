@@ -650,6 +650,115 @@ func TestDebugTranscriptLoggingNonStreaming(t *testing.T) {
 	assert.Contains(t, logBuf.String(), "cost: total=$0.000321 upstream_inference=$0.000222")
 }
 
+func TestEndToEnd_AuthRequired(t *testing.T) {
+	proxy, cleanup := newTestProxy("test-key", "")
+	defer cleanup()
+	proxy.config.InternalSharedSecret = "test-secret"
+	proxy.setupMux()
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestEndToEnd_AuthWithValidToken(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": "chatcmpl-test", "object": "chat.completion",
+			"model": "google/gemini-2.5-flash",
+			"choices": []map[string]interface{}{
+				{"index": 0, "message": map[string]string{"role": "assistant", "content": "Hi"}, "finish_reason": "stop"},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	proxy, cleanup := newTestProxy("test-key", mock.URL)
+	defer cleanup()
+	proxy.config.InternalSharedSecret = "test-secret"
+	proxy.setupMux()
+
+	token := generateTestInstanceToken(1, 1, "test-secret", time.Hour)
+	chatReq := schema.ChatCompletionRequest{
+		Model:    "google/gemini-2.5-flash",
+		Messages: []schema.ChatMessage{{Role: "user", Content: "hello"}},
+	}
+	bodyBytes, _ := json.Marshal(chatReq)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestEndToEnd_HealthNoAuthRequired(t *testing.T) {
+	proxy, cleanup := newTestProxy("test-key", "")
+	defer cleanup()
+	proxy.config.InternalSharedSecret = "test-secret"
+	proxy.setupMux()
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestEndToEnd_SearchEndpoint(t *testing.T) {
+	brave := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"web": map[string]interface{}{
+				"results": []map[string]interface{}{
+					{"title": "Test", "url": "https://test.com", "description": "Test result"},
+				},
+			},
+		})
+	}))
+	defer brave.Close()
+
+	proxy, cleanup := newTestProxy("test-key", "")
+	defer cleanup()
+	proxy.search = NewSearchHandler("brave-key", brave.URL)
+	proxy.setupMux()
+
+	body, _ := json.Marshal(SearchRequest{Query: "test"})
+	req := httptest.NewRequest("POST", "/v1/search", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp SearchResponse
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Len(t, resp.Results, 1)
+	assert.Equal(t, "Test", resp.Results[0].Title)
+}
+
+func TestEndToEnd_SearchWithAuthRequired(t *testing.T) {
+	proxy, cleanup := newTestProxy("test-key", "")
+	defer cleanup()
+	proxy.config.InternalSharedSecret = "test-secret"
+	proxy.search = NewSearchHandler("brave-key", "")
+	proxy.setupMux()
+
+	body, _ := json.Marshal(SearchRequest{Query: "test"})
+	req := httptest.NewRequest("POST", "/v1/search", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
 func TestDebugTranscriptLoggingStreaming(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
