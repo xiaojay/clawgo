@@ -1,6 +1,6 @@
 # ClawGo
 
-Go 实现的智能 LLM 路由代理，使用 OpenRouter 作为后端。移植自 [ClawRouter](https://github.com/BlockRunAI/ClawRouter) 的 14 维智能路由引擎。
+Go 实现的智能 LLM 路由代理，使用 OpenRouter 作为后端。移植自 [ClawRouter](https://github.com/BlockRunAI/ClawRouter) 的 14 维智能路由引擎，支持实例认证、搜索代理和用量追踪。
 
 ## 目录
 
@@ -15,6 +15,9 @@ Go 实现的智能 LLM 路由代理，使用 OpenRouter 作为后端。移植自
   - [会话固定](#会话固定)
   - [余额监控](#余额监控)
   - [SSE 流式转发](#sse-流式转发)
+  - [实例认证](#实例认证)
+  - [搜索代理](#搜索代理)
+  - [用量追踪](#用量追踪)
 - [源码分析](#源码分析)
 - [OpenClaw 集成](#openclaw-集成)
 - [配置参考](#配置参考)
@@ -74,6 +77,11 @@ curl -X POST http://localhost:8402/v1/chat/completions \
     "messages": [{"role": "user", "content": "hello"}]
   }'
 
+# Web 搜索 (需配置 BRAVE_API_KEY)
+curl -X POST http://localhost:8402/v1/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Go concurrency patterns", "count": 5}'
+
 # 健康检查
 curl http://localhost:8402/health
 ```
@@ -83,6 +91,13 @@ curl http://localhost:8402/health
 ```bash
 docker build -t clawgo .
 docker run -e OPENROUTER_API_KEY=sk-or-v1-xxx -p 8402:8402 clawgo
+
+# 启用搜索和用量追踪
+docker run \
+  -e OPENROUTER_API_KEY=sk-or-v1-xxx \
+  -e BRAVE_API_KEY=BSA-xxx \
+  -e CLAWGO_USAGE_DSN='user:pass@tcp(db:3306)/clawgo' \
+  -p 8402:8402 clawgo
 ```
 
 ---
@@ -96,7 +111,12 @@ docker run -e OPENROUTER_API_KEY=sk-or-v1-xxx -p 8402:8402 clawgo
 ┌──────────────────────────────────────────────┐
 │        ClawGo 本地代理 (:8402)                │
 │                                              │
-│  ┌──────────┐    ┌──────────┐                │
+│  ┌──────────┐  (可选)                         │
+│  │ JWT 认证  │  CLAWGO_INTERNAL_SHARED_SECRET │
+│  │ 实例隔离  │  → instance_id / user_id       │
+│  └────┬─────┘                                │
+│       │                                      │
+│  ┌────▼─────┐    ┌──────────┐                │
 │  │ 请求去重  │───▶│ 响应缓存  │                │
 │  │ SHA-256  │    │ LRU 200  │                │
 │  │ 30s TTL  │    │ 10min    │                │
@@ -119,9 +139,14 @@ docker run -e OPENROUTER_API_KEY=sk-or-v1-xxx -p 8402:8402 clawgo
 │  │ + 回退链  │◀──▶│ 30min    │                │
 │  └────┬─────┘    └──────────┘                │
 │       │                                      │
-│  ┌────▼─────┐                                │
-│  │ 余额检查  │  OpenRouter /api/v1/auth/key   │
-│  │ 30s 缓存  │                                │
+│  ┌────▼─────┐    ┌──────────┐  (可选)        │
+│  │ 余额检查  │    │ 搜索代理  │  BRAVE_API_KEY │
+│  │ 30s 缓存  │    │ Brave    │  POST /v1/search│
+│  └────┬─────┘    └──────────┘                │
+│       │                                      │
+│  ┌────▼─────┐  (可选)                         │
+│  │ 用量追踪  │  CLAWGO_USAGE_DSN → MySQL      │
+│  │ 异步写入  │  llm_usage / search_usage      │
 │  └────┬─────┘                                │
 │       │                                      │
 └───────┼──────────────────────────────────────┘
@@ -135,24 +160,29 @@ docker run -e OPENROUTER_API_KEY=sk-or-v1-xxx -p 8402:8402 clawgo
 ### 请求处理流程
 
 ```
-1. 收到 POST /v1/chat/completions
-2. SHA-256 哈希请求体 → 检查去重缓存
+1. 收到请求
+   ├─ POST /v1/chat/completions → LLM 路由流程
+   ├─ POST /v1/search → 搜索代理 (Brave)
+   └─ GET /health, /v1/models → 直接处理
+2. (可选) JWT 认证 → 提取 instance_id/user_id
+3. SHA-256 哈希请求体 → 检查去重缓存
    ├─ 命中 → 直接返回缓存响应
    └─ 未命中 → 继续
-3. 解析 model 字段
-   ├─ "auto"/"eco"/"premium" → 进入智能路由
+4. 解析 model 字段
+   ├─ "auto"/"eco"/"premium"/"balanced"/"value"/自定义 → 进入智能路由
    │   ├─ 14 维评分 → 加权求和 → 分层
    │   ├─ 检查会话固定 → 复用已有模型
    │   └─ 选择主模型 + 构建回退链
    └─ 具体模型名 → 直接转发
-4. 检查响应缓存 (非流式)
+5. 检查响应缓存 (非流式)
    ├─ 命中 → 返回
    └─ 未命中 → 继续
-5. 转发到 OpenRouter
+6. 转发到 OpenRouter
    ├─ 流式 → SSE 透传 + 2s 心跳保活
    └─ 非流式 → 等待完整响应
-6. 出错 (429/5xx) → 尝试回退链下一个模型 (最多 5 次)
-7. 缓存响应 + 完成去重 + 更新会话
+7. 出错 (429/5xx) → 尝试回退链下一个模型 (最多 5 次)
+8. 缓存响应 + 完成去重 + 更新会话
+9. (可选) 异步记录用量 → MySQL
 ```
 
 ---
@@ -354,6 +384,77 @@ Turn 3: "写测试"          → 固定到 gemini-pro
 
 心跳以 SSE 注释格式（`: heartbeat\n\n`）发送，不会干扰 SSE 解析器。
 
+### 实例认证
+
+基于 JWT 的认证中间件，适用于多实例/多租户部署：
+
+```
+请求 → Authorization: Bearer <JWT> → 验证签名 → 提取 instance_id/user_id → 注入 context
+```
+
+**启用方式：** 设置环境变量 `CLAWGO_INTERNAL_SHARED_SECRET`，留空则跳过认证（pass-through 模式）。
+
+**JWT Claims：**
+```json
+{
+  "instance_id": 42,
+  "user_id": 1001
+}
+```
+
+- `instance_id` 必填，缺失返回 401
+- `user_id` 可选
+- 认证信息注入请求 context，供搜索和用量追踪模块使用
+
+### 搜索代理
+
+通过 Brave Search API 提供 Web 搜索能力，适合 agent 调用：
+
+```
+POST /v1/search
+  → 解析请求 → 调用 Brave Search API → 返回结构化结果
+```
+
+**启用方式：** 设置环境变量 `BRAVE_API_KEY`，未配置则返回 503。
+
+**请求参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `query` | string | (必填) | 搜索关键词 |
+| `count` | int | 5 | 返回结果数 (最大 20) |
+| `country` | string | | 国家代码 (如 `US`, `CN`) |
+| `language` | string | | 搜索语言 (如 `en`, `zh`) |
+| `safesearch` | string | | 安全搜索 (`off`/`moderate`/`strict`) |
+
+**响应示例：**
+```json
+{
+  "results": [
+    {"title": "...", "url": "https://...", "description": "..."}
+  ],
+  "provider": "brave",
+  "query": "best programming practices"
+}
+```
+
+### 用量追踪
+
+可选的 MySQL 用量记录，异步写入不影响请求延迟：
+
+```
+请求完成 → goroutine 异步写入 → llm_usage_events / search_usage_events
+                              → usage_dailies (每日聚合 UPSERT)
+```
+
+**启用方式：** 设置环境变量 `CLAWGO_USAGE_DSN`，格式：`user:pass@tcp(host:port)/db`。
+
+**记录的 LLM 字段：** instance_id, user_id, request_id, model_requested, model_resolved, prompt_tokens, completion_tokens, total_tokens, status, error_code, latency_ms, cache_hit
+
+**记录的搜索字段：** instance_id, user_id, request_id, provider, query, result_count, status, error_code, latency_ms
+
+**每日聚合表 `usage_dailies`：** 按 instance_id + user_id + date 维度聚合 LLM 请求数、token 数、搜索请求数、错误数，使用 `ON DUPLICATE KEY UPDATE` 原子累加。
+
 ---
 
 ## 源码分析
@@ -364,30 +465,43 @@ Turn 3: "写测试"          → 固定到 gemini-pro
 clawgo/
 ├── cmd/
 │   └── clawgo/
-│       └── main.go              # CLI 入口 (69 行)
+│       └── main.go                # CLI 入口 (84 行)
 ├── clawgo/
 │   ├── schema/
-│   │   ├── api.go               # OpenAI 请求/响应类型 (72 行)
-│   │   ├── model.go             # 模型/OpenRouter 类型 (63 行)
-│   │   ├── router.go            # 路由/分层类型 (56 行)
-│   │   └── error.go             # 错误码常量 (13 行)
-│   ├── clawgo.go                # 主入口 New/Run/Close (81 行)
-│   ├── proxy.go                 # HTTP 代理 + SSE (465 行)
-│   ├── router.go                # 14维分类器 (467 行)
-│   ├── selector.go              # 模型选择 + 成本 (156 行)
-│   ├── models.go                # 模型目录 (190 行)
-│   ├── balance.go               # 余额监控 (101 行)
-│   ├── dedup.go                 # 请求去重 (198 行)
-│   ├── cache.go                 # 响应缓存 (148 行)
-│   ├── session.go               # 会话固定 (208 行)
-│   └── config.go                # 配置加载 (78 行)
-├── example/basic/main.go        # 使用示例
-├── Dockerfile                   # 多阶段构建
-├── Makefile                     # 构建/测试/格式化
+│   │   ├── api.go                 # OpenAI 请求/响应类型
+│   │   ├── model.go               # 模型/OpenRouter 类型
+│   │   ├── router.go              # 路由/分层类型
+│   │   └── error.go               # 错误码常量
+│   ├── clawgo.go                  # 主入口 New/Run/Close (105 行)
+│   ├── proxy.go                   # HTTP 代理 + SSE (708 行)
+│   ├── router.go                  # 14维分类器 (466 行)
+│   ├── selector.go                # 模型选择 + 成本 (155 行)
+│   ├── models.go                  # 模型目录 (199 行)
+│   ├── balance.go                 # 余额监控 (110 行)
+│   ├── dedup.go                   # 请求去重 (197 行)
+│   ├── cache.go                   # 响应缓存 (147 行)
+│   ├── session.go                 # 会话固定 (207 行)
+│   ├── config.go                  # 配置加载 (227 行)
+│   ├── instance_auth.go           # JWT 实例认证 (89 行)
+│   ├── search.go                  # Brave 搜索代理 (203 行)
+│   ├── usage.go                   # MySQL 用量追踪 (145 行)
+│   ├── debug_http.go              # HTTP 调试日志 (152 行)
+│   └── debug_transcript.go        # LLM 对话 transcript (394 行)
+├── python/
+│   ├── clawgo_model_selector.py   # Python 版路由+选型器
+│   └── test_clawgo_model_selector.py
+├── docs/
+│   ├── openrouter-balanced-profile.md
+│   ├── openrouter-value-profile.md
+│   └── python-model-selector.md
+├── example/basic/main.go          # 使用示例
+├── Dockerfile                     # 多阶段构建
+├── Makefile                       # 构建/测试/格式化
+├── config.example.yaml            # 完整配置示例
 ├── go.mod
 └── go.sum
 
-总计: 2,064 行 Go 源码, 42 个测试
+总计: ~3,500 行 Go 源码, 78 个测试
 ```
 
 ### 模块依赖关系
@@ -395,16 +509,21 @@ clawgo/
 ```
 cmd/clawgo/main.go
     └── clawgo.go (New / Run / Close)
-            ├── config.go         ← 环境变量 + YAML
-            ├── router.go         ← 14 维分类器 (无外部依赖)
-            ├── models.go         ← OpenRouter API 拉取
-            ├── selector.go       ← 层级→模型 + 成本
-            ├── balance.go        ← 余额查询 + 缓存
-            ├── session.go        ← 会话固定 + 升级
-            ├── dedup.go          ← 请求去重
-            ├── cache.go          ← 响应缓存 LRU
-            └── proxy.go          ← HTTP 代理 (组装所有模块)
-                    └── schema/*  ← 类型定义
+            ├── config.go            ← 环境变量 + YAML
+            ├── router.go            ← 14 维分类器 (无外部依赖)
+            ├── models.go            ← OpenRouter API 拉取
+            ├── selector.go          ← 层级→模型 + 成本
+            ├── balance.go           ← 余额查询 + 缓存
+            ├── session.go           ← 会话固定 + 升级
+            ├── dedup.go             ← 请求去重
+            ├── cache.go             ← 响应缓存 LRU
+            ├── instance_auth.go     ← JWT 认证中间件
+            ├── search.go            ← Brave 搜索代理
+            ├── usage.go             ← MySQL 用量追踪
+            ├── debug_http.go        ← HTTP 调试日志
+            ├── debug_transcript.go  ← LLM 对话日志
+            └── proxy.go             ← HTTP 代理 (组装所有模块)
+                    └── schema/*     ← 类型定义
 ```
 
 ### 代码风格 (everFinance 规范)
@@ -672,7 +791,12 @@ sudo systemctl start clawgo
 | `CLAWGO_PROFILE` | `auto` | 默认路由配置 |
 | `CLAWGO_DEBUG_HTTP` | `false` | 打印入站请求和 OpenRouter HTTP 交互日志 |
 | `CLAWGO_DEBUG_TRANSCRIPT` | `false` | 打印可读的 LLM 对话 transcript |
+| `CLAWGO_REQUEST_TIMEOUT_SEC` | `45` | 上游请求超时秒数 |
+| `CLAWGO_MODELS_TIMEOUT_SEC` | `15` | 模型列表拉取超时秒数 |
 | `CLAWGO_CONFIG` | `~/.clawgo/config.yaml` | 配置文件路径 |
+| `CLAWGO_INTERNAL_SHARED_SECRET` | (空) | JWT 认证密钥，留空则禁用认证 |
+| `BRAVE_API_KEY` | (空) | Brave Search API Key，留空则禁用搜索 |
+| `CLAWGO_USAGE_DSN` | (空) | MySQL 连接串 (`user:pass@tcp(host:port)/db`)，留空则禁用用量追踪 |
 
 ### CLI 参数
 
@@ -777,6 +901,9 @@ OpenAI 兼容的聊天补全接口。
 - `auto` / `clawgo/auto` — 智能路由 (均衡)
 - `eco` / `clawgo/eco` — 智能路由 (省钱)
 - `premium` / `clawgo/premium` — 智能路由 (高质量)
+- `balanced` / `clawgo/balanced` — 智能路由 (适合 coding agent)
+- `value` / `clawgo/value` — 智能路由 (性价比)
+- 自定义配置名 — YAML 中定义的任意 profile
 - `openai/gpt-4o`, `anthropic/claude-sonnet-4`, ... — 直接指定 OpenRouter 模型
 
 **响应：** 标准 OpenAI 格式 (ChatCompletionResponse)。
@@ -796,6 +923,38 @@ OpenAI 兼容的聊天补全接口。
 }
 ```
 
+### POST /v1/search
+
+Web 搜索接口（需配置 `BRAVE_API_KEY`）。
+
+**请求体：**
+
+```json
+{
+  "query": "best programming practices",
+  "count": 5,
+  "country": "US",
+  "language": "en",
+  "safesearch": "moderate"
+}
+```
+
+**响应：**
+
+```json
+{
+  "results": [
+    {
+      "title": "Best Programming Practices",
+      "url": "https://example.com/...",
+      "description": "A guide to..."
+    }
+  ],
+  "provider": "brave",
+  "query": "best programming practices"
+}
+```
+
 ### GET /v1/models
 
 透传 OpenRouter 的模型列表。
@@ -812,6 +971,9 @@ OpenAI 兼容的聊天补全接口。
 | 支付 | USDC 区块链微支付 | OpenRouter 余额 |
 | 路由引擎 | 14 维分类器 | 14 维分类器 (完全移植) |
 | 模型目录 | 硬编码 41+ 模型 | 动态拉取 (启动时) |
+| 搜索 | 无 | Brave Search 集成 |
+| 认证 | 无 | JWT 实例认证 |
+| 用量追踪 | 无 | MySQL 异步记录 |
 | 压缩 | 7 层上下文压缩 | (后续添加) |
 | 图片生成 | 5 个图片模型 | (后续添加) |
 | 钱包管理 | BIP-39 / EVM / Solana | 无 (不需要) |
